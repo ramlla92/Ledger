@@ -19,10 +19,31 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, AsyncIterator, TypedDict
 from uuid import UUID, uuid4
 import json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
+
+
+# ─── EXCEPTIONS ─────────────────────────────────────────────────────────────
+
+class DomainError(Exception):
+    """Raised for business rule violations in aggregates or command handlers."""
+    pass
+
+
+# ─── TYPES ──────────────────────────────────────────────────────────────────
+
+class StoredEvent(TypedDict):
+    """Structure of an event as returned by the EventStore load/append methods."""
+    event_id: UUID | str
+    stream_id: str
+    stream_position: int
+    event_type: str
+    event_version: int
+    payload: dict[str, Any]
+    metadata: dict[str, Any]
+    recorded_at: datetime
 
 
 # ─── ENUMS ───────────────────────────────────────────────────────────────────
@@ -257,9 +278,10 @@ class DecisionGenerated(BaseEvent):
     event_type: str = "DecisionGenerated"
     event_version: int = 2
     application_id: str
+    orchestrator_agent_id: str
     orchestrator_session_id: str
     recommendation: str
-    confidence: float
+    confidence_score: float = Field(..., validation_alias=AliasChoices('confidence_score', 'confidence'))
     approved_amount_usd: Decimal | None = None
     conditions: list[str] = Field(default_factory=list)
     executive_summary: str
@@ -408,6 +430,15 @@ class AgentSessionStarted(BaseEvent):
     context_token_count: int
     started_at: datetime
 
+class AgentContextLoaded(BaseEvent):
+    """The first event in an AgentSession stream, locking the model version (Gas Town)."""
+    event_type: str = "AgentContextLoaded"
+    session_id: str
+    agent_id: str
+    model_version: str
+    context_source: str
+    loaded_at: datetime
+
 class AgentInputValidated(BaseEvent):
     event_type: str = "AgentInputValidated"
     session_id: str
@@ -530,6 +561,7 @@ class CreditAnalysisCompleted(BaseEvent):
     event_type: str = "CreditAnalysisCompleted"
     event_version: int = 2
     application_id: str
+    agent_id: str
     session_id: str
     decision: CreditDecision
     model_version: str
@@ -680,6 +712,7 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
     "QualityAssessmentCompleted": QualityAssessmentCompleted,
     "PackageReadyForAnalysis": PackageReadyForAnalysis,
     # AgentSession
+    "AgentContextLoaded": AgentContextLoaded,
     "AgentSessionStarted": AgentSessionStarted,
     "AgentInputValidated": AgentInputValidated,
     "AgentInputValidationFailed": AgentInputValidationFailed,
