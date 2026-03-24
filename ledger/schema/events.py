@@ -34,7 +34,10 @@ class DomainError(Exception):
 
 # ─── TYPES ──────────────────────────────────────────────────────────────────
 
-class StoredEvent(TypedDict):
+from dataclasses import dataclass
+
+@dataclass
+class StoredEvent:
     """Structure of an event as returned by the EventStore load/append methods."""
     event_id: UUID | str
     stream_id: str
@@ -44,6 +47,7 @@ class StoredEvent(TypedDict):
     payload: dict[str, Any]
     metadata: dict[str, Any]
     recorded_at: datetime
+    global_position: int = 0
 
 
 

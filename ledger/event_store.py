@@ -11,9 +11,11 @@ COMPLETION CHECKLIST (implement in order):
 from __future__ import annotations
 import json
 from datetime import datetime
-from typing import AsyncGenerator
+from typing import AsyncGenerator, AsyncIterator, Sequence, Callable
 from uuid import UUID
 import asyncpg
+
+from ledger.schema.events import StoredEvent
 
 
 class OptimisticConcurrencyError(Exception):
@@ -120,71 +122,66 @@ class EventStore:
         stream_id: str,
         from_position: int = 0,
         to_position: int | None = None,
-    ) -> list[dict]:
+    ) -> list[StoredEvent]:
         """
         Loads events from a stream in stream_position order.
         Applies upcasters if self.upcasters is set.
-
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                q = ("SELECT event_id, stream_id, stream_position, event_type,"
-                     " event_version, payload, metadata, recorded_at"
-                     " FROM events WHERE stream_id=$1 AND stream_position>=$2")
-                params = [stream_id, from_position]
-                if to_position is not None:
-                    q += " AND stream_position<=$3"; params.append(to_position)
-                q += " ORDER BY stream_position ASC"
-                rows = await conn.fetch(q, *params)
-                events = []
-                for row in rows:
-                    e = {**dict(row), "payload": dict(row["payload"]),
-                                       "metadata": dict(row["metadata"])}
-                    if self.upcasters: e = self.upcasters.upcast(e)
-                    events.append(e)
-                return events
         """
+        # IMPLEMENT:
+        # async with self._pool.acquire() as conn:
+        #     rows = await conn.fetch(
+        #         "SELECT * FROM events WHERE stream_id = $1 AND stream_position >= $2 "
+        #         "AND ($3::int IS NULL OR stream_position <= $3::int) ORDER BY stream_position",
+        #         stream_id, from_position, to_position
+        #     )
+        #     events = [dict(row) for row in rows]
+        #     if self.upcasters:
+        #         events = [self.upcasters.upcast(e) for e in events]
+        #     return [StoredEvent(**e) for e in events]
         raise NotImplementedError("Implement load_stream()")
 
     async def load_all(
         self, from_position: int = 0, batch_size: int = 500
-    ) -> AsyncGenerator[dict, None]:
+    ) -> AsyncGenerator[StoredEvent, None]:
         """
         Async generator yielding all events by global_position.
         Used by the ProjectionDaemon.
-
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                pos = from_position
-                while True:
-                    rows = await conn.fetch(
-                        "SELECT global_position, stream_id, stream_position,"
-                        " event_type, event_version, payload, metadata, recorded_at"
-                        " FROM events WHERE global_position > $1"
-                        " ORDER BY global_position ASC LIMIT $2",
-                        pos, batch_size)
-                    if not rows: break
-                    for row in rows:
-                        e = {**dict(row), "payload": dict(row["payload"]),
-                                           "metadata": dict(row["metadata"])}
-                        yield e
-                    pos = rows[-1]["global_position"]
-                    if len(rows) < batch_size: break
         """
+        # IMPLEMENT:
+        # async with self._pool.acquire() as conn:
+        #     current_position = from_position
+        #     while True:
+        #         rows = await conn.fetch(
+        #             "SELECT * FROM events WHERE global_position >= $1 "
+        #             "ORDER BY global_position LIMIT $2",
+        #             current_position, batch_size
+        #         )
+        #         if not rows:
+        #             break
+        #         events = [dict(row) for row in rows]
+        #         if self.upcasters:
+        #             events = [self.upcasters.upcast(e) for e in events]
+        #         for event_dict in events:
+        #             yield StoredEvent(**event_dict)
+        #         current_position = events[-1]["global_position"] + 1
         raise NotImplementedError("Implement load_all()")
-        if False: yield {}  # makes Python treat this as a generator
+        if False: yield StoredEvent(None, None, None, None, None, None, None, None)
 
-    async def get_event(self, event_id: UUID) -> dict | None:
+    async def get_event(self, event_id: UUID) -> StoredEvent | None:
         """
         Loads one event by UUID. Used for causation chain lookups.
-
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM events WHERE event_id=$1", event_id)
-                if not row: return None
-                return {**dict(row), "payload": dict(row["payload"]),
-                                      "metadata": dict(row["metadata"])}
         """
+        # IMPLEMENT:
+        # async with self._pool.acquire() as conn:
+        #     row = await conn.fetchrow(
+        #         "SELECT * FROM events WHERE event_id = $1", str(event_id)
+        #     )
+        #     if row:
+        #         event_dict = dict(row)
+        #         if self.upcasters:
+        #             event_dict = self.upcasters.upcast(event_dict)
+        #         return StoredEvent(**event_dict)
+        #     return None
         raise NotImplementedError("Implement get_event()")
 
 
@@ -295,26 +292,26 @@ class InMemoryEventStore:
         stream_id: str,
         from_position: int = 0,
         to_position: int | None = None,
-    ) -> list[dict]:
+    ) -> list[StoredEvent]:
         events = self._streams.get(stream_id, [])
         result = [e for e in events if e["stream_position"] >= from_position]
         if to_position is not None:
             result = [e for e in result if e["stream_position"] <= to_position]
         if self.upcasters:
-            result = [self.upcasters.upcast(dict(e)) for e in result]
-        return result
+            result = [self.upcasters.upcast(e) for e in result]
+        return [StoredEvent(**e) for e in result]
 
     async def load_all(
         self, from_position: int = 0, batch_size: int = 500
-    ):
-        for event in self._global:
-            if event["global_position"] >= from_position:
-                yield dict(event)
+    ) -> AsyncGenerator[StoredEvent, None]:
+        batch = [e for e in self._global if e["global_position"] > from_position][:batch_size]
+        for e in batch:
+            yield StoredEvent(**e)
 
-    async def get_event(self, event_id) -> dict | None:
+    async def get_event(self, event_id) -> StoredEvent | None:
         for event in self._global:
             if event["event_id"] == str(event_id):
-                return dict(event)
+                return StoredEvent(**event)
         return None
 
 
@@ -393,23 +390,23 @@ class InMemoryEventStore:
         stream_id: str,
         from_position: int = 0,
         to_position: int | None = None,
-    ) -> list[dict]:
+    ) -> list[StoredEvent]:
         events = [
             e for e in self._streams.get(stream_id, [])
             if e["stream_position"] >= from_position
             and (to_position is None or e["stream_position"] <= to_position)
         ]
-        return sorted(events, key=lambda e: e["stream_position"])
+        return [StoredEvent(**e) for e in sorted(events, key=lambda e: e["stream_position"])]
 
-    async def load_all(self, from_position: int = 0, batch_size: int = 500):
+    async def load_all(self, from_position: int = 0, batch_size: int = 500) -> AsyncGenerator[StoredEvent, None]:
         for e in self._global:
             if e["global_position"] >= from_position:
-                yield e
+                yield StoredEvent(**e)
 
-    async def get_event(self, event_id: str) -> dict | None:
+    async def get_event(self, event_id: UUID) -> StoredEvent | None:
         for e in self._global:
-            if e["event_id"] == event_id:
-                return e
+            if str(e["event_id"]) == str(event_id):
+                return StoredEvent(**e)
         return None
 
     async def save_checkpoint(self, projection_name: str, position: int) -> None:
