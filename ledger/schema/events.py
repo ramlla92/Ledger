@@ -46,6 +46,7 @@ class StoredEvent(TypedDict):
     recorded_at: datetime
 
 
+
 # ─── ENUMS ───────────────────────────────────────────────────────────────────
 
 class RiskTier(str, Enum):

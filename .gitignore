@@ -37,6 +37,7 @@ ENV/
 
 # Project Specific
 data/
+documents/
 artifacts/
 *.log
 .pytest_cache/
