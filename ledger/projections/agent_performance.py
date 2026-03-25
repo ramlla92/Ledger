@@ -11,7 +11,8 @@ class AgentPerformanceLedgerProjection(Projection):
         return {
             "CreditAnalysisCompleted",
             "DecisionGenerated",
-            "HumanReviewCompleted"
+            "HumanReviewCompleted",
+            "FraudScreeningCompleted"
         }
 
     async def handle(self, event: StoredEvent) -> None:
@@ -26,6 +27,9 @@ class AgentPerformanceLedgerProjection(Projection):
             # For Orchestrator, try to pull its own model version or default to v1
             mv = event.payload.get("model_versions", {})
             model_version = mv.get("orchestrator") or "v1"
+        elif event.event_type == "FraudScreeningCompleted":
+            agent_id = event.payload.get("agent_id")
+            model_version = event.payload.get("screening_model_version")
         elif event.event_type == "HumanReviewCompleted":
             # Per prompt: "confirm whether metrics should be attached to the orchestrator agent/model rather than reviewer_id, and implement a better strategy."
             # A human review override is typically a reflection on the DECISION ORCHESTRATOR's performance.
@@ -50,6 +54,9 @@ class AgentPerformanceLedgerProjection(Projection):
             n = current["analyses_completed"]
             prev_avg = current["avg_duration_ms"] or 0
             current["avg_duration_ms"] = prev_avg + (dur - prev_avg) / n
+
+        elif event.event_type == "FraudScreeningCompleted":
+            current["analyses_completed"] += 1
 
         elif event.event_type == "DecisionGenerated":
             current["decisions_generated"] += 1

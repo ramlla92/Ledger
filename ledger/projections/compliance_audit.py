@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
-from typing import Set
+from decimal import Decimal
+from typing import Set, Optional
 from ledger.projections.base import Projection
 from ledger.schema.events import StoredEvent
 
@@ -18,7 +19,8 @@ class ComplianceAuditViewProjection(Projection):
             "ComplianceRulePassed",
             "ComplianceRuleFailed",
             "ComplianceRuleNoted",
-            "ComplianceCheckCompleted"
+            "ComplianceCheckCompleted",
+            "FraudScreeningCompleted"
         }
 
     async def handle(self, event: StoredEvent) -> None:
@@ -28,7 +30,8 @@ class ComplianceAuditViewProjection(Projection):
 
         state = await self.get_current_compliance(app_id)
         
-        # Merge event data into state based on spec names
+    def _apply_event(self, state: dict, event: StoredEvent) -> dict:
+        """Pure function to fold an event into state."""
         if event.event_type == "ComplianceCheckInitiated":
             state["status"] = "INITIATED"
             state["rules_to_evaluate"] = event.payload.get("rules_to_evaluate", [])
@@ -51,19 +54,34 @@ class ComplianceAuditViewProjection(Projection):
         elif event.event_type == "ComplianceCheckCompleted":
             state["status"] = "COMPLETED"
             state["verdict"] = event.payload.get("overall_verdict")
+        elif event.event_type == "FraudScreeningCompleted":
+            state["fraud_screening"] = {
+                "score": event.payload.get("fraud_score"),
+                "flags": event.payload.get("anomaly_flags"),
+                "model": event.payload.get("screening_model_version"),
+                "completed_at": event.payload.get("completed_at")
+            }
+        return state
+
+    async def handle(self, event: StoredEvent) -> None:
+        app_id = event.payload.get("application_id")
+        if not app_id:
+            return
+
+        state = await self.get_current_compliance(app_id)
+        state = self._apply_event(state, event)
 
         # Save current view
         await self._upsert_current(app_id, state)
         
         # Periodic Snapshots instead of every event
-        # We can track an 'event_count' in state to decide if we snapshot
         cnt = state.get("_event_count", 0) + 1
         state["_event_count"] = cnt
         if cnt % SNAPSHOT_INTERVAL == 0 or event.event_type == "ComplianceCheckCompleted":
              await self._create_snapshot(app_id, event.recorded_at, state)
 
     async def get_current_compliance(self, application_id: str) -> dict:
-        if not self.store._pool:
+        if not getattr(self.store, "_pool", None):
             return {"application_id": application_id}
             
         async with self.store._pool.acquire() as conn:
@@ -75,20 +93,24 @@ class ComplianceAuditViewProjection(Projection):
 
     async def get_compliance_at(self, application_id: str, timestamp: datetime) -> dict:
         """
-        To implement zero-downtime historical state, we grab the latest snapshot prior to `timestamp`,
-        then theoretically we could load subsequent events up to `timestamp` and replay them in memory.
-        For now, returning the snapshot is our baseline implementation.
+        True zero-downtime historical state using Event Sourcing.
+        We load all events from both loan and compliance streams up to the timestamp and replay them!
         """
-        if not self.store._pool:
-            return {"error": "Store not connected"}
-            
-        async with self.store._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT state FROM compliance_audit_snapshots WHERE application_id = $1 AND snapshot_at <= $2 ORDER BY snapshot_at DESC LIMIT 1",
-                application_id, timestamp
-            )
-            # Replaying events from snapshot up to timestamp omitted for brevity but recommended for exact point-in-time
-            return json.loads(row["state"]) if row else {}
+        loan_stream = f"loan-{application_id}"
+        compliance_stream = f"compliance-{application_id}"
+        
+        # Load events from both related streams
+        loan_events = await self.store.load_stream(loan_stream)
+        comp_events = await self.store.load_stream(compliance_stream)
+        
+        # Merge and sort by recording time for correct causal replay
+        all_events = sorted(loan_events + comp_events, key=lambda e: e.recorded_at)
+        
+        state = {"application_id": application_id, "_temporal_reconstructed_at": timestamp.isoformat()}
+        for e in all_events:
+            if e.recorded_at <= timestamp:
+                state = self._apply_event(state, e)
+        return state
 
     async def get_projection_lag(self) -> int:
         return await self.get_lag()
@@ -152,7 +174,11 @@ class ComplianceAuditViewProjection(Projection):
 
     async def _upsert_current(self, app_id: str, state: dict) -> None:
         if not self.store._pool: return
-        state_json = json.dumps(state)
+        def json_serial(obj):
+            if isinstance(obj, (datetime, Decimal)):
+                return obj.isoformat() if isinstance(obj, datetime) else float(obj)
+            raise TypeError(f"Type {type(obj)} not serializable")
+        state_json = json.dumps(state, default=json_serial)
         async with self.store._pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO compliance_audit_view (application_id, state, updated_at)
@@ -164,10 +190,24 @@ class ComplianceAuditViewProjection(Projection):
 
     async def _create_snapshot(self, app_id: str, recorded_at: datetime, state: dict) -> None:
         if not self.store._pool: return
-        state_json = json.dumps(state)
+        def json_serial(obj):
+            if isinstance(obj, (datetime, Decimal)):
+                return obj.isoformat() if isinstance(obj, datetime) else float(obj)
+            raise TypeError(f"Type {type(obj)} not serializable")
+        state_json = json.dumps(state, default=json_serial)
         async with self.store._pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO compliance_audit_snapshots (application_id, snapshot_at, state)
                 VALUES ($1, $2, $3::jsonb)
                 ON CONFLICT (application_id, snapshot_at) DO NOTHING
             """, app_id, recorded_at, state_json)
+    async def get_by_id(self, app_id: str, as_of: Optional[datetime] = None) -> Optional[dict]:
+        """Public query method for MCP resources."""
+        if as_of:
+            data = await self.get_compliance_at(app_id, as_of)
+        else:
+            data = await self.get_current_compliance(app_id)
+            
+        if data.get("status") is None and not as_of:
+            return None
+        return data

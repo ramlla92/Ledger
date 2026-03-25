@@ -1,5 +1,5 @@
 import json
-from typing import Set
+from typing import Set, Optional
 from ledger.projections.base import Projection
 from ledger.schema.events import StoredEvent
 
@@ -37,7 +37,7 @@ class ApplicationSummaryProjection(Projection):
             # Don't jump backwards if we are already in compliance or pending decision
             if current["state"] in ("SUBMITTED", "UNKNOWN", "CREDIT_ANALYSIS_REQUESTED", "DOCUMENTS_PROCESSED"):
                 current["state"] = "CREDIT_ANALYSIS_COMPLETE"
-            current["risk_tier"] = event.payload.get("decision", {}).get("risk_tier")
+            current["risk_tier"] = event.payload.get("risk_tier")
             sess = event.payload.get("session_id")
             if sess and sess not in current["agent_sessions_completed"]:
                 current["agent_sessions_completed"].append(sess)
@@ -48,6 +48,7 @@ class ApplicationSummaryProjection(Projection):
             if current["state"] in ("SUBMITTED", "UNKNOWN", "CREDIT_ANALYSIS_REQUESTED", "CREDIT_ANALYSIS_COMPLETE"):
                 current["state"] = "FRAUD_SCREENING_COMPLETE"
             current["fraud_score"] = event.payload.get("fraud_score")
+            current["anomaly_flags"] = event.payload.get("anomaly_flags", [])
             sess = event.payload.get("session_id")
             if sess and sess not in current["agent_sessions_completed"]:
                 current["agent_sessions_completed"].append(sess)
@@ -88,7 +89,7 @@ class ApplicationSummaryProjection(Projection):
                 "agent_sessions_completed": [],
                 "applicant_id": None, "requested_amount_usd": None,
                 "approved_amount_usd": None, "risk_tier": None,
-                "fraud_score": None, "compliance_status": None,
+                "fraud_score": None, "anomaly_flags": [], "compliance_status": None,
                 "decision": None, "last_event_type": None,
                 "last_event_at": None, "human_reviewer_id": None,
                 "final_decision_at": None
@@ -112,7 +113,7 @@ class ApplicationSummaryProjection(Projection):
                 "requested_amount_usd": None,
                 "approved_amount_usd": None,
                 "risk_tier": None,
-                "fraud_score": None,
+                "fraud_score": None, "anomaly_flags": [],
                 "compliance_status": None,
                 "decision": None,
                 "last_event_type": None,
@@ -219,3 +220,9 @@ class ApplicationSummaryProjection(Projection):
 
             lag_timedelta = max_time - current_time
             return int(lag_timedelta.total_seconds() * 1000)
+    async def get_by_id(self, app_id: str) -> Optional[dict]:
+        """Public query method for MCP resources."""
+        data = await self._get_or_create(app_id)
+        if data.get("state") == "UNKNOWN":
+            return None
+        return data
